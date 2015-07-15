@@ -1,0 +1,2 @@
+exports.parseAppID = 'xxxxx';
+exports.parseMasterKey = 'xxxxx';
