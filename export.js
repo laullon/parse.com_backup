@@ -1,77 +1,43 @@
-var config = require('./config.js');
-var HTTP = require('https');
-var URL = require('url');
+var Api = require('./api.js');
+var Query = require('./query.js');
+
 var Promise = require('promise');
-var Querystring = require('querystring');
-var FS = require('fs');
+var Path = require('path');
+var util = require('util');
+var Temp = require('temp');
+var fs = require('fs');
+var archiver = require('archiver');
 
-var prepareRequestOptions = function (f) {
-    var options = URL.parse("https://api.parse.com/1/" + f);
-    options.headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-Parse-Application-Id': config.parseAppID,
-        'X-Parse-Master-Key': config.parseMasterKey,
-        'Content-Type': 'application/json'
-    };
-    return options;
-};
-
-var getSchema = function () {
+var createZip = function (path) {
     return new Promise(function (resolve, reject) {
-        var options = prepareRequestOptions("schemas");
-        var req = HTTP.request(options, function (res) {
-            res.setEncoding('utf8');
-            var body = '';
-            res.on('data', function (chunk) {
-                body += chunk;
-            });
-            res.on('end', function () {
-                var parsed = JSON.parse(body);
-                resolve(parsed);
-            });
-        });
-        req.end();
-    });
-};
+        var outputPath = "./export.zip";
+        var output = fs.createWriteStream(outputPath);
 
-var query = function (className, rows, resolve) {
-    var postData = Querystring.stringify({
-        'skip': rows.length,
-        'limit': 1000
-    });
+        var zipArchive = archiver('zip');
+        zipArchive.pipe(output);
+        zipArchive.bulk([{
+            src: ['**/*'],
+            cwd: path,
+            expand: true
+        }]);
 
-    var options = prepareRequestOptions("classes/" + className);
-    options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-    options.headers['Content-Length'] = postData.length;
+        output.on('close', function () {
+            console.log('done with the zip', outputPath, zipArchive.pointer() + ' total bytes');
+            resolve();
+        });
 
-    var req = HTTP.request(options, function (res) {
-        res.setEncoding('utf8');
-        var body = '';
-        res.on('data', function (chunk) {
-            body += chunk;
+        zipArchive.on('error', function (err) {
+            reject(err);
         });
-        res.on('end', function () {
-            var res = JSON.parse(body);
-            if (res.results.length != 0) {
-                rows = rows.concat(res.results);
-                query(className, rows, resolve);
-            } else {
-                console.log("class: " + className + " - " + rows.length + " rows");
-                var exp = {
-                    'results': rows
-                };
-                resolve(exp);
-            }
-        });
+
+        zipArchive.finalize();
     });
-    req.write(postData);
-    req.end();
 };
 
 var saveClass = function (className, data) {
     return new Promise(function (resolve, reject) {
-        var fileName = "/tmp/" + className + ".json";
-        FS.writeFile(fileName, JSON.stringify(data, null, 4), function (err) {
+        var fileName = tempDir + "/" + className + ".json";
+        fs.writeFile(fileName, JSON.stringify(data, null, 4), function (err) {
             if (err) {
                 reject(err);
             } else {
@@ -82,23 +48,49 @@ var saveClass = function (className, data) {
     });
 };
 
-var downloadClass = function (className) {
-    return new Promise(function (resolve, reject) {
-        var rows = [];
-        query(className, rows, resolve);
-    }).then(function (data) {
+var downloadClass = function (api, className) {
+    var rows = [];
+    return Query.loadClass(api, className, function (newChuck) {
+        console.log("class:" + className + " + " + newChuck.length + " rows");
+        rows = rows.concat(newChuck);
+    }).then(function () {
+        console.log("class:" + className + " - total:" + rows.length + " rows");
+        var data = {
+            'results': rows
+        };
         return saveClass(className, data);
     });
 };
 
-getSchema().then(function (res) {
+//*********
+
+var api;
+
+Temp.track()
+var tempDir = Temp.mkdirSync();
+
+if (process.argv.length != 3) {
+    console.log("Usage: " + process.argv[0] + " " + Path.basename(process.argv[1]) + " <config>");
+    return;
+} else {
+    var cfg = process.argv[2];
+    api = new Api(cfg);
+}
+
+console.log("Start !!!");
+console.log("Output: " + tempDir);
+
+Query.getSchema(api).then(function (res) {
     var downloads = [];
     res.results.forEach(function (item) {
-        downloads.push(downloadClass(item.className));
+        console.log("-" + item.className + " Start !!!");
+        downloads.push(downloadClass(api, item.className));
     });
     return Promise.all(downloads);
 }).then(function () {
+    return createZip(tempDir);
+}).then(function () {
     console.log("Done !!!");
 }, function (error) {
-    console.log("error:" + error);
+    console.log("Export error: " + error);
 });
